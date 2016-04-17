@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(name='pylgtv',
-      version='0.0.5',
+      version='0.0.6',
       description='Library to control webOS based LG Tv devices',
       url='https://github.com/TheRealLink/pylgtv',
       author='Dennis Karpienski',

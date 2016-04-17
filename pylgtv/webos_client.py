@@ -43,7 +43,7 @@ class WebOsClient(object):
         self.client_key = None
         key_file_path = self._get_key_file_path()
 
-        with open(key_file_path, 'r') as f:
+        with open(key_file_path, 'w+') as f:
             raw_data = f.read()
             key_dict = {}
 
