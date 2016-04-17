@@ -203,6 +203,10 @@ class WebOsClient(object):
         self.request(EP_GET_INPUTS)
         return self.last_response['payload']['devices']
 
+    def get_input(self):
+        """Get current input."""
+        return self.get_current_app()
+
     def set_input(self, input):
         """Set the current input."""
         self.request(EP_SET_INPUT, {
