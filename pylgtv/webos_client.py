@@ -94,6 +94,10 @@ class WebOsClient(object):
                 self.client_key = response['payload']['client-key']
                 self.save_key_file()
 
+    def is_registered(self):
+        """Paired with the tv."""
+        return self.client_key is not None
+
     @asyncio.coroutine
     def _register(self):
         """Register wrapper."""
