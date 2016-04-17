@@ -71,7 +71,8 @@ class WebOsClient(object):
 
             f.write(json.dumps(key_dict))
 
-    async def _send_register_payload(self, websocket):
+    @asyncio.coroutine
+    def _send_register_payload(self, websocket):
         """Send the register payload."""
         file = os.path.join(os.path.dirname(__file__), HANDSHAKE_FILE_NAME)
 
@@ -81,42 +82,54 @@ class WebOsClient(object):
         handshake = json.loads(raw_handshake)
         handshake['payload']['client-key'] = self.client_key
 
-        await websocket.send(json.dumps(handshake))
-        raw_response = await websocket.recv()
+        yield from websocket.send(json.dumps(handshake))
+        raw_response = yield from websocket.recv()
         response = json.loads(raw_response)
 
         if response['type'] == 'response' and \
                         response['payload']['pairingType'] == 'PROMPT':
-            raw_response = await websocket.recv()
+            raw_response = yield from websocket.recv()
             response = json.loads(raw_response)
             if response['type'] == 'registered':
                 self.client_key = response['payload']['client-key']
                 self.save_key_file()
 
-    async def _register(self):
+    @asyncio.coroutine
+    def _register(self):
         """Register wrapper."""
-        async with websockets.connect(
-                "ws://{}:{}".format(self.ip, self.port)) as websocket:
-            await self._send_register_payload(websocket)
+        websocket = yield from  websockets.connect(
+                "ws://{}:{}".format(self.ip, self.port))
+
+        try:
+            yield from self._send_register_payload(websocket)
+
+        finally:
+            yield from websocket.close()
 
     def register(self):
         """Pair client with tv."""
         asyncio.get_event_loop().run_until_complete(self._register())
 
-    async def _command(self, msg):
+    @asyncio.coroutine
+    def _command(self, msg):
         """Send a command to the tv."""
-        async with websockets.connect(
-                "ws://{}:{}".format(self.ip, self.port)) as websocket:
-            await self._send_register_payload(websocket)
+        websocket = yield from websockets.connect(
+                "ws://{}:{}".format(self.ip, self.port))
+
+        try:
+            yield from self._send_register_payload(websocket)
 
             if not self.client_key:
                 raise PyLGTVPairException("Unable to pair")
 
-            await websocket.send(json.dumps(msg))
+            yield from websocket.send(json.dumps(msg))
 
             if msg['type'] == 'request':
-                raw_response = await websocket.recv()
+                raw_response = yield from websocket.recv()
                 self.last_response = json.loads(raw_response)
+
+        finally:
+            yield from websocket.close()
 
     def command(self, request_type, uri, payload):
         """Build and send a command."""
