@@ -11,6 +11,12 @@ USER_HOME = 'HOME'
 HANDSHAKE_FILE_NAME = 'handshake.json'
 
 
+class PyLGTVPairException(Exception):
+    def __init__(self, id, message):
+        self.id = id
+        self.message = message
+
+
 class WebOsClient(object):
     def __init__(self, ip):
         """Initialize the client."""
@@ -104,7 +110,7 @@ class WebOsClient(object):
             await self._send_register_payload(websocket)
 
             if not self.client_key:
-                raise Exception("Unable to pair")
+                raise PyLGTVPairException("Unable to pair")
 
             await websocket.send(json.dumps(msg))
 
