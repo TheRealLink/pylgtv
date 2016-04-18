@@ -45,16 +45,15 @@ class WebOsClient(object):
         """Try to load the client key for the current ip."""
         self.client_key = None
         key_file_path = self._get_key_file_path()
+        key_dict = {}
 
-        with open(key_file_path, 'w+') as f:
-            raw_data = f.read()
-            key_dict = {}
-
-            if raw_data:
+        if os.path.isfile(key_file_path):
+            with open(key_file_path, 'r') as f:
+                raw_data = f.read()
                 key_dict = json.loads(raw_data)
 
-            if self.ip in key_dict:
-                self.client_key = key_dict[self.ip]
+        if self.ip in key_dict:
+            self.client_key = key_dict[self.ip]
 
     def save_key_file(self):
         """Save the current client key."""
