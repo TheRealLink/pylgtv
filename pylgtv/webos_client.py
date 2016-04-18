@@ -27,9 +27,6 @@ class WebOsClient(object):
         self.command_count = 0
         self.last_response = None
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
         self.load_key_file()
 
     @staticmethod
@@ -115,7 +112,9 @@ class WebOsClient(object):
 
     def register(self):
         """Pair client with tv."""
-        asyncio.get_event_loop().run_until_complete(self._register())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._register())
 
     @asyncio.coroutine
     def _command(self, msg):
@@ -153,7 +152,9 @@ class WebOsClient(object):
         }
 
         self.last_response = None
-        asyncio.get_event_loop().run_until_complete(self._command(message))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._command(message))
 
     def request(self, uri, payload=None):
         """Send a request."""
