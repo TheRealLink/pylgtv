@@ -27,6 +27,9 @@ class WebOsClient(object):
         self.command_count = 0
         self.last_response = None
 
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         self.load_key_file()
 
     @staticmethod
