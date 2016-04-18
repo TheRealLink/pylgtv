@@ -188,9 +188,11 @@ class WebOsClient(object):
             'params': params
         })
 
-    def close_app(self):
+    def close_app(self, app):
         """Close the current app."""
-        self.request(EP_LAUNCHER_CLOSE)
+        self.request(EP_LAUNCHER_CLOSE, {
+            'id': app
+        })
 
     # Services
     def get_services(self):
@@ -331,3 +333,14 @@ class WebOsClient(object):
     def send_delete_key(self):
         """Send delete key."""
         self.request(EP_SEND_DELETE)
+
+    # Web
+    def open_url(self, url):
+        """Open URL."""
+        self.request(EP_OPEN, {
+            'target': url
+        })
+
+    def close_web(self):
+        """Close web app."""
+        self.request(EP_CLOSE_WEB_APP)
