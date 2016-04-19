@@ -270,7 +270,7 @@ class WebOsClient(object):
 
     def volume_down(self):
         """Volume down."""
-        self.request(EP_VOLUME_UP)
+        self.request(EP_VOLUME_DOWN)
 
     # TV Channel
     def channel_up(self):
