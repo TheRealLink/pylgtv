@@ -18,10 +18,11 @@ class PyLGTVPairException(Exception):
 
 
 class WebOsClient(object):
-    def __init__(self, ip):
+    def __init__(self, ip, key_file_path=None):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
+        self.key_file_path = key_file_path
         self.client_key = None
         self.web_socket = None
         self.command_count = 0
@@ -41,7 +42,10 @@ class WebOsClient(object):
     def load_key_file(self):
         """Try to load the client key for the current ip."""
         self.client_key = None
-        key_file_path = self._get_key_file_path()
+        if self.key_file_path:
+            key_file_path = self.key_file_path
+        else:
+            key_file_path = self._get_key_file_path()
         key_dict = {}
 
         if os.path.isfile(key_file_path):
@@ -58,7 +62,10 @@ class WebOsClient(object):
         if self.client_key is None:
             return
 
-        key_file_path = self._get_key_file_path()
+        if self.key_file_path:
+            key_file_path = self.key_file_path
+        else:
+            key_file_path = self._get_key_file_path()
 
         with open(key_file_path, 'w+') as f:
             raw_data = f.read()
