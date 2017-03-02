@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import codecs
 import json
 import os
@@ -167,10 +168,20 @@ class WebOsClient(object):
         """Send a request."""
         self.command('request', uri, payload)
 
-    def send_message(self, message):
+    def send_message(self, message, icon_path=None):
         """Show a floating message."""
+        icon_encoded_string = ''
+        icon_extension = ''
+
+        if icon_path is not None:
+            icon_extension = os.path.splitext(icon_path)[1][1:]
+            with open(icon_path, 'rb') as icon_file:
+                icon_encoded_string = base64.b64encode(icon_file.read()).decode('ascii')
+
         self.request(EP_SHOW_MESSAGE, {
-            'message': message
+            'message': message,
+            'iconData': icon_encoded_string,
+            'iconExtension': icon_extension
         })
 
     # Apps
