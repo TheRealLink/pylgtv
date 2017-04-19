@@ -1,6 +1,14 @@
 # pylgtv
 Library to control webOS based LG Tv devices
 
+## Requirements
+- Python >= 3.3
+
+## Install
+```
+pip install pylgtv
+```
+
 ## Example
 
 ```python
