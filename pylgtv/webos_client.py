@@ -22,7 +22,7 @@ class PyLGTVPairException(Exception):
 
 
 class WebOsClient(object):
-    def __init__(self, ip, key_file_path=None):
+    def __init__(self, ip, key_file_path=None, timeout_connect=2):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
@@ -31,7 +31,7 @@ class WebOsClient(object):
         self.web_socket = None
         self.command_count = 0
         self.last_response = None
-        self.timeout_connect = 2
+        self.timeout_connect = timeout_connect
 
         self.load_key_file()
 
