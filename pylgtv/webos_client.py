@@ -4,6 +4,9 @@ import codecs
 import json
 import os
 import websockets
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .endpoints import *
 
@@ -19,7 +22,7 @@ class PyLGTVPairException(Exception):
 
 
 class WebOsClient(object):
-    def __init__(self, ip, key_file_path=None):
+    def __init__(self, ip, key_file_path=None, timeout_connect=2):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
@@ -28,6 +31,7 @@ class WebOsClient(object):
         self.web_socket = None
         self.command_count = 0
         self.last_response = None
+        self.timeout_connect = timeout_connect
 
         self.load_key_file()
 
@@ -49,12 +53,15 @@ class WebOsClient(object):
             key_file_path = self._get_key_file_path()
         key_dict = {}
 
+        logger.debug('load keyfile from %s', key_file_path);
+
         if os.path.isfile(key_file_path):
             with open(key_file_path, 'r') as f:
                 raw_data = f.read()
                 if raw_data:
                     key_dict = json.loads(raw_data)
 
+        logger.debug('getting client_key for %s from %s', self.ip, key_file_path);
         if self.ip in key_dict:
             self.client_key = key_dict[self.ip]
 
@@ -67,6 +74,8 @@ class WebOsClient(object):
             key_file_path = self.key_file_path
         else:
             key_file_path = self._get_key_file_path()
+
+        logger.debug('save keyfile to %s', key_file_path);
 
         with open(key_file_path, 'w+') as f:
             raw_data = f.read()
@@ -109,8 +118,16 @@ class WebOsClient(object):
     @asyncio.coroutine
     def _register(self):
         """Register wrapper."""
-        websocket = yield from  websockets.connect(
-                "ws://{}:{}".format(self.ip, self.port))
+        logger.debug('register on %s', "ws://{}:{}".format(self.ip, self.port));
+        try:
+            websocket = yield from websockets.connect(
+                "ws://{}:{}".format(self.ip, self.port), timeout=self.timeout_connect)
+
+        except:
+            logger.error('register failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
+            return False
+
+        logger.info('register websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
 
         try:
             yield from self._send_register_payload(websocket)
@@ -127,8 +144,16 @@ class WebOsClient(object):
     @asyncio.coroutine
     def _command(self, msg):
         """Send a command to the tv."""
-        websocket = yield from websockets.connect(
-                "ws://{}:{}".format(self.ip, self.port))
+        logger.debug('send command to %s', "ws://{}:{}".format(self.ip, self.port));
+        try:
+            websocket = yield from websockets.connect(
+                "ws://{}:{}".format(self.ip, self.port), timeout=self.timeout_connect)
+
+        except:
+            logger.error('command failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
+            return False
+
+        logger.info('command websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
 
         try:
             yield from self._send_register_payload(websocket)
@@ -162,7 +187,7 @@ class WebOsClient(object):
         self.last_response = None
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._command(message))
+        loop.run_until_complete(asyncio.wait_for(self._command(message), self.timeout_connect))
 
     def request(self, uri, payload=None):
         """Send a request."""
