@@ -1,14 +1,18 @@
-from setuptools import setup
+from distutils.core import setup
 
-setup(name='pylgtv',
-      version='0.1.5',
-      description='Library to control webOS based LG Tv devices',
-      url='https://github.com/TheRealLink/pylgtv',
-      author='Dennis Karpienski',
-      author_email='dennis@karpienski.de',
-      license='MIT',
-      packages=['pylgtv'],
-      package_dir={'pylgtv': 'pylgtv'},
-      package_data={'pylgtv': ['handshake.json']},
-      install_requires=['websockets', 'asyncio'],
-      zip_safe=True)
+setup(
+      name = 'pylgtv',
+      packages = ['pylgtv'],
+      package_dir = {'pylgtv': 'pylgtv'},
+      package_data = {'pylgtv': ['handshake.json']},
+      install_requires = ['websockets', 'asyncio'],
+      zip_safe = True,
+      version = '0.1.5',
+      description = 'Library to control webOS based LG Tv devices',
+      author = 'Dennis Karpienski',
+      author_email = 'dennis@karpienski.de',
+      url = 'https://github.com/TheRealLink/pylgtv',
+      download_url = 'https://github.com/TheRealLink/pylgtv/archive/0.1.5.tar.gz',
+      keywords = ['webos', 'tv'],
+      classifiers = [],
+)
