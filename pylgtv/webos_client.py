@@ -186,9 +186,13 @@ class WebOsClient(object):
         }
 
         self.last_response = None
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(asyncio.wait_for(self._command(message), self.timeout_connect))
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(asyncio.wait_for(self._command(message), self.timeout_connect, loop=loop))
+        finally:
+            loop.close()
 
     def request(self, uri, payload=None):
         """Send a request."""
@@ -214,12 +218,12 @@ class WebOsClient(object):
     def get_apps(self):
         """Return all apps."""
         self.request(EP_GET_APPS)
-        return self.last_response['payload']['launchPoints']
+        return {} if self.last_response is None else self.last_response.get('payload').get('launchPoints')
 
     def get_current_app(self):
         """Get the current app id."""
         self.request(EP_GET_CURRENT_APP_INFO)
-        return self.last_response['payload']['appId']
+        return None if self.last_response is None else self.last_response.get('payload').get('appId')
 
     def launch_app(self, app):
         """Launch an app."""
@@ -244,12 +248,12 @@ class WebOsClient(object):
     def get_services(self):
         """Get all services."""
         self.request(EP_GET_SERVICES)
-        return self.last_response['payload']['services']
+        return {} if self.last_response is None else self.last_response.get('payload').get('services')
 
     def get_software_info(self):
         """Return the current software status."""
         self.request(EP_GET_SOFTWARE_INFO)
-        return self.last_response['payload']
+        return {} if self.last_response is None else self.last_response.get('payload')
 
     def power_off(self):
         """Play media."""
@@ -268,7 +272,7 @@ class WebOsClient(object):
     def get_inputs(self):
         """Get all inputs."""
         self.request(EP_GET_INPUTS)
-        return self.last_response['payload']['devices']
+        return {} if self.last_response is None else self.last_response.get('payload').get('devices')
 
     def get_input(self):
         """Get current input."""
@@ -284,11 +288,11 @@ class WebOsClient(object):
     def get_audio_status(self):
         """Get the current audio status"""
         self.request(EP_GET_AUDIO_STATUS)
-        return self.last_response['payload']
+        return {} if self.last_response is None else self.last_response.get('payload')
 
     def get_muted(self):
         """Get mute status."""
-        return self.get_audio_status()['mute']
+        return self.get_audio_status().get('mute')
 
     def set_mute(self, mute):
         """Set mute."""
@@ -299,7 +303,7 @@ class WebOsClient(object):
     def get_volume(self):
         """Get the current volume."""
         self.request(EP_GET_VOLUME)
-        return self.last_response['payload']['volume']
+        return 0 if self.last_response is None else self.last_response.get('payload').get('volume')
 
     def set_volume(self, volume):
         """Set volume."""
@@ -328,17 +332,17 @@ class WebOsClient(object):
     def get_channels(self):
         """Get all tv channels."""
         self.request(EP_GET_TV_CHANNELS)
-        return self.last_response['payload']['channelList']
+        return {} if self.last_response is None else self.last_response.get('payload').get('channelList')
 
     def get_current_channel(self):
         """Get the current tv channel."""
         self.request(EP_GET_CURRENT_CHANNEL)
-        return self.last_response['payload']
+        return {} if self.last_response is None else self.last_response.get('payload')
 
     def get_channel_info(self):
         """Get the current channel info."""
         self.request(EP_GET_CHANNEL_INFO)
-        return self.last_response['payload']
+        return {} if self.last_response is None else self.last_response.get('payload')
 
     def set_channel(self, channel):
         """Set the current channel."""
