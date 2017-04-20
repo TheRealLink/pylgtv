@@ -127,12 +127,13 @@ class WebOsClient(object):
             logger.error('register failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
             return False
 
-        logger.info('register websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
+        logger.debug('register websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
 
         try:
             yield from self._send_register_payload(websocket)
 
         finally:
+            logger.debug('close register connection to %s', "ws://{}:{}".format(self.ip, self.port));
             yield from websocket.close()
 
     def register(self):
@@ -148,12 +149,11 @@ class WebOsClient(object):
         try:
             websocket = yield from websockets.connect(
                 "ws://{}:{}".format(self.ip, self.port), timeout=self.timeout_connect)
-
         except:
             logger.error('command failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
             return False
 
-        logger.info('command websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
+        logger.debug('command websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));
 
         try:
             yield from self._send_register_payload(websocket)
@@ -168,6 +168,7 @@ class WebOsClient(object):
                 self.last_response = json.loads(raw_response)
 
         finally:
+            logger.debug('close command connection to %s', "ws://{}:{}".format(self.ip, self.port));
             yield from websocket.close()
 
     def command(self, request_type, uri, payload):
