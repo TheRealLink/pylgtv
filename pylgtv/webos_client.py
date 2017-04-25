@@ -150,7 +150,7 @@ class WebOsClient(object):
             websocket = yield from websockets.connect(
                 "ws://{}:{}".format(self.ip, self.port), timeout=self.timeout_connect)
         except:
-            logger.error('command failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
+            logger.debug('command failed to connect to %s', "ws://{}:{}".format(self.ip, self.port));
             return False
 
         logger.debug('command websocket connected to %s', "ws://{}:{}".format(self.ip, self.port));

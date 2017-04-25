@@ -7,7 +7,7 @@ setup(
       package_data = {'pylgtv': ['handshake.json']},
       install_requires = ['websockets', 'asyncio'],
       zip_safe = True,
-      version = '0.1.6',
+      version = '0.1.7',
       description = 'Library to control webOS based LG Tv devices',
       author = 'Dennis Karpienski',
       author_email = 'dennis@karpienski.de',
