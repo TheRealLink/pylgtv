@@ -394,3 +394,9 @@ class WebOsClient(object):
     def close_web(self):
         """Close web app."""
         self.request(EP_CLOSE_WEB_APP)
+
+    # System
+    def create_toast(self, message):
+        self.request(EP_CREATE_TOAST, {
+            'message': message
+        })
