@@ -259,6 +259,10 @@ class WebOsClient(object):
         """Play media."""
         self.request(EP_POWER_OFF)
 
+    def power_on(self):
+        """Play media."""
+        self.request(EP_POWER_ON)
+
     # 3D Mode
     def turn_3d_on(self):
         """Turn 3D on."""
