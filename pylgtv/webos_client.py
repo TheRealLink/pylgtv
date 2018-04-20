@@ -231,18 +231,19 @@ class WebOsClient(object):
             'id': app
         })
 
-    def launch_app_with_params(self, app, params=None, contentId=None):
+    def launch_app_with_params(self, app, params):
         """Launch an app with parameters."""
-        if contentId is None:
-            self.request(EP_LAUNCH, {
-                'id': app,
-                'params': params
-            })
-        else:
-            self.request(EP_LAUNCH, {
-                'id': app,
-                'contentId': contentId
-            })
+        self.request(EP_LAUNCH, {
+            'id': app,
+            'params': params
+        })
+
+    def launch_app_with_content_id(self, app, contentId):
+        """Launch an app with contentId."""
+        self.request(EP_LAUNCH, {
+            'id': app,
+            'contentId': contentId
+        })
 
     def close_app(self, app):
         """Close the current app."""
