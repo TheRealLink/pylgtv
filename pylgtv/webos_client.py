@@ -238,6 +238,13 @@ class WebOsClient(object):
             'params': params
         })
 
+    def launch_app_with_content_id(self, app, contentId):
+        """Launch an app with contentId."""
+        self.request(EP_LAUNCH, {
+            'id': app,
+            'contentId': contentId
+        })
+
     def close_app(self, app):
         """Close the current app."""
         self.request(EP_LAUNCHER_CLOSE, {
