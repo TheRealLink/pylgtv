@@ -12,7 +12,7 @@ setup(
       author = 'Dennis Karpienski',
       author_email = 'dennis@karpienski.de',
       url = 'https://github.com/TheRealLink/pylgtv',
-      download_url = 'https://github.com/TheRealLink/pylgtv/archive/0.1.8.tar.gz',
+      download_url = 'https://github.com/TheRealLink/pylgtv/archive/0.1.9.tar.gz',
       keywords = ['webos', 'tv'],
       classifiers = [],
 )
