@@ -405,3 +405,69 @@ class WebOsClient(object):
     def close_web(self):
         """Close web app."""
         self.request(EP_CLOSE_WEB_APP)
+
+    # Mouse controls
+    @asyncio.coroutine
+    def _input_command(self, msg, ws=None):
+        """Send an input command to the tv."""
+        logger.debug('send command to %s', "{}".format(ws));
+        try:
+            mouse_sock = yield from websockets.connect(ws, timeout=self.timeout_connect)
+        except:
+            logger.debug('command failed to connect to %s', "{}".format(ws));
+            return False
+
+        logger.debug('command websocket connected to %s', "{}".format(ws));
+
+        try:
+            yield from mouse_sock.send(msg)
+
+        finally:
+            logger.debug('close command connection to %s', "{}".format(ws));
+            yield from mouse_sock.close()
+
+    def input_command(self, payload):
+        """Retrieve mouse websocket and send an input command."""
+        #generate input socket
+        self.request(uri="com.webos.service.networkinput/getPointerInputSocket")
+        res = self.last_response
+        sock_path = res.get("payload").get("socketPath")
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(asyncio.wait_for(self._input_command(payload, sock_path), self.timeout_connect, loop=loop))
+        finally:
+            loop.close()
+
+    def send_button(self, button):
+        #possible buttons LEFT, RIGHT, DOWN, UP, HOME, BACK, ENTER, DASH, INFO,
+        # 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, ASTERISK, CC, EXIT, MUTE, RED, GREEN,
+        # BLUE, VOLUMEUP, VOLUMEDOWN, CHANNELUP, CHANNELDOWN
+        """Send button command."""
+        button = str(button).upper()
+        payload = 'type:button' + '\n' 'name:' + button + '\n\n'
+        self.input_command(payload)
+
+    def send_click(self):
+        """Send click command."""
+        payload = 'type:click\n\n'
+        self.input_command(payload)
+
+    def send_scroll(self, dx='0', dy='0', down='0'):
+        #scroll wheel, ex. dy=1 scroll up 1 dy=-1 scroll down 1
+        """Send scroll command."""
+        dx = str(dx)
+        dy = str(dy)
+        down = str(down)
+        payload = 'type:scroll' + '\n' 'dx:' + dx + '\n' 'dy:' + dy + '\ndown:' + down + '\n\n'
+        self.input_command(payload)
+
+    def send_move(self, dx='0', dy='0', down='0'):
+        #not sure how this works on TV, doesn't seem to be absolute or relative
+        """Send move command."""
+        dx = str(dx)
+        dy = str(dy)
+        down = str(down)
+        payload = 'type:move' + '\n' 'dx:' + dx + '\n' 'dy:' + dy + '\ndown:' + down + '\n\n'
+        self.input_command(payload)
