@@ -5,7 +5,7 @@ import json
 import os
 import websockets
 import logging
-from uuid import uuid4
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class PyLGTVCmdException(Exception):
 
 
 class WebOsClient(object):
-    def __init__(self, ip, key_file_path=None, timeout_connect=2):
+    def __init__(self, ip, key_file_path=None, timeout_connect=2, timeout_request=10, ping_interval=20):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
@@ -34,12 +34,15 @@ class WebOsClient(object):
         self.web_socket = None
         self.command_count = 0
         self.timeout_connect = timeout_connect
+        self.timeout_request = timeout_request
+        self.ping_interval = ping_interval
         self.connection = None
         self.input_connection = None
         self.listen_task = None
         self.listen_input_task = None
         self.callbacks = {}
         self.futures = {}
+        self.disconnect_callback = None
 
         self.load_key_file()
 
@@ -111,7 +114,7 @@ class WebOsClient(object):
         handshake['payload']['client-key'] = self.client_key
         
         try:
-            self.connection = await asyncio.wait_for(websockets.connect(f"ws://{self.ip}:{self.port}", ping_interval=1, ping_timeout=self.timeout_connect, close_timeout=self.timeout_connect), timeout=self.timeout_connect)
+            self.connection = await asyncio.wait_for(websockets.connect(f"ws://{self.ip}:{self.port}", ping_interval=self.ping_interval, ping_timeout=self.timeout_connect, close_timeout=self.timeout_connect), timeout=self.timeout_connect)
 
             await self.connection.send(json.dumps(handshake))
             raw_response = await self.connection.recv()
@@ -137,7 +140,7 @@ class WebOsClient(object):
             #endpoint on the main connection
             res = await self.request(EP_INPUT_SOCKET)
             inputsockpath = res.get("socketPath")
-            self.input_connection =  await asyncio.wait_for(websockets.connect(inputsockpath, ping_interval=1, ping_timeout=self.timeout_connect, close_timeout=self.timeout_connect), timeout = self.timeout_connect)
+            self.input_connection =  await asyncio.wait_for(websockets.connect(inputsockpath, ping_interval=self.ping_interval, ping_timeout=self.timeout_connect, close_timeout=self.timeout_connect), timeout = self.timeout_connect)
 
             self.listen_input_task = asyncio.get_event_loop().create_task(self.listen_input())
         except:
@@ -159,7 +162,7 @@ class WebOsClient(object):
         self.callbacks = {}    
 
         for future in self.futures.values():
-            future.set_exception(asyncio.CancelledError)
+            future.cancel()
         self.futures = {}
 
         closeout = set()
@@ -171,15 +174,17 @@ class WebOsClient(object):
             closeout.add(self.connection.close())
         if self.input_connection is not None:
             closeout.add(self.input_connection.close())
+        if self.disconnect_callback is not None:
+            closeout.add(self.disconnect_callback())
         
-        if closeout:
-            await asyncio.wait(closeout)
-            
         self.listen_task = None
         self.listen_input_task = None
         self.connection = None
         self.input_connection = None
         
+        if closeout:
+            await asyncio.wait(closeout)
+            
     def is_registered(self):
         """Paired with the tv."""
         return self.client_key is not None
@@ -187,6 +192,23 @@ class WebOsClient(object):
     def is_connected(self):
         """Connected to the tv."""
         return self.connection is not None and self.input_connection is not None
+    
+    async def ping(self):
+        pings = set()
+        if self.connection is not None:
+            pings.add(self.connection.ping())
+        if self.input_connection is not None:
+            pings.add(self.input_connection.ping())
+            
+        if pings:
+            try:
+                await asyncio.wait(pings, timeout=self.timeout_connect)
+            except asyncio.TimeoutError:
+                await self.disconnect()
+    
+    def set_disconnect_callback(self, callback):
+        """Set callback function on disconnect."""
+        self.disconnect_callback = callback
 
     async def listen(self):
         """Listen for incoming messages and handle disconnect."""
@@ -226,7 +248,8 @@ class WebOsClient(object):
     async def command(self, request_type, uri, payload=None, uid=None):
         """Build and send a command."""
         if uid is None:
-            uid = str(uuid4())
+            uid = self.command_count
+            self.command_count += 1
 
         if payload is None:
             payload = {}
@@ -245,24 +268,28 @@ class WebOsClient(object):
 
     async def request(self, uri, payload=None):
         """Send a request and wait for response."""
-        uid = str(uuid4())
+        uid = self.command_count
+        self.command_count += 1
         res = asyncio.Future()
         self.futures[uid] = res
-        await self.command('request', uri, payload, uid)
         try:
-            response = await asyncio.wait_for(res, timeout = self.timeout_connect)
-        except asyncio.TimeoutError:
+            await self.command('request', uri, payload, uid)
+        except PyLGTVCmdException:
             del self.futures[uid]
-            await self.disconnect()
             raise
-        except asyncio.CancelledError:
+        try:
+            response = await asyncio.wait_for(res, timeout = self.timeout_request)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            if uid in self.futures:
+                del self.futures[uid]
             raise
         del self.futures[uid]
         return response
     
     async def subscribe(self, callback, uri, payload=None):
         """Subscribe to updates."""
-        uid = str(uuid4())
+        uid = self.command_count
+        self.command_count += 1
         self.callbacks[uid] = callback
         await self.command('subscribe', uri, payload, uid)
     
@@ -385,9 +412,18 @@ class WebOsClient(object):
         """Return the current software status."""
         return await self.request(EP_GET_SOFTWARE_INFO)
 
-    async def power_off(self):
-        """Play media."""
-        await self.request(EP_POWER_OFF)
+    async def power_off(self, disconnect=True):
+        """Power off TV."""
+        if disconnect:
+            #if tv is shutting down and standby++ option is not enabled,
+            #response is unreliable, so don't wait for one,
+            #and force immediate disconnect
+            await self.command('request', EP_POWER_OFF)
+            await self.disconnect()
+        else:
+            #if standby++ option is enabled, connection stays open
+            #and TV responds gracefully to power off request
+            await self.request(EP_POWER_OFF)
 
     async def power_on(self):
         """Play media."""
