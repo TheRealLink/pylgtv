@@ -198,7 +198,7 @@ class WebOsClient(object):
         """Send a request."""
         self.command('request', uri, payload)
 
-    def send_message(self, message, icon_path=None):
+    def send_message(self, message, app='', target='', icon_path=None):
         """Show a floating message."""
         icon_encoded_string = ''
         icon_extension = ''
@@ -210,6 +210,12 @@ class WebOsClient(object):
 
         self.request(EP_SHOW_MESSAGE, {
             'message': message,
+            'onClick': {
+                'appId': app,
+                'params': {
+                    'target': target
+                    }
+                },
             'iconData': icon_encoded_string,
             'iconExtension': icon_extension
         })
