@@ -6,10 +6,12 @@ import os
 import websockets
 import logging
 import sys
+import copy
 
 logger = logging.getLogger(__name__)
 
 from .endpoints import *
+from .handshake import REGISTRATION_MESSAGE
 
 KEY_FILE_NAME = '.pylgtv'
 USER_HOME = 'HOME'
@@ -23,9 +25,31 @@ class PyLGTVPairException(Exception):
 class PyLGTVCmdException(Exception):
     pass
 
+#simple wrapper to add timeout and disconnect callback to websocket connection async context manager
+class WebSocketConnectWrapper(websockets.connect):
+    def __init__(self, *args, **kwargs):
+        self.connect_timeout = kwargs.pop('connect_timeout', None)
+        self.disconnect_callback = kwargs.pop('disconnect_callback', None)
+        super(WebSocketConnectWrapper, self).__init__(*args, **kwargs)
+    
+    async def __aenter__(self, *args, **kwargs):
+        if self.connect_timeout is not None:
+            return await asyncio.wait_for(super(WebSocketConnectWrapper, self).__aenter__(*args, **kwargs), timeout = self.connect_timeout)
+        else:
+            return await super(WebSocketConnectWrapper, self).__aenter__(*args, **kwargs)
+    
+    async def __aexit__(self, *args, **kwargs):
+        if self.disconnect_callback is not None:
+            _,res = await asyncio.gather(self.disconnect_callback(),
+                                 super(WebSocketConnectWrapper, self).__aexit__(*args, **kwargs)
+                                 )
+            return res
+        else:
+            return await super(WebSocketConnectWrapper, self).__aexit__(*args, **kwargs)
+    
 
 class WebOsClient(object):
-    def __init__(self, ip, key_file_path=None, timeout_connect=2, timeout_request=10, ping_interval=20):
+    def __init__(self, ip, key_file_path=None, timeout_connect=2, timeout_request=10, ping_interval=20, disconnect_callback = None):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
@@ -36,13 +60,13 @@ class WebOsClient(object):
         self.timeout_connect = timeout_connect
         self.timeout_request = timeout_request
         self.ping_interval = ping_interval
-        self.connection = None
-        self.input_connection = None
-        self.listen_task = None
-        self.listen_input_task = None
-        self.callbacks = {}
+        self.connect_task = None
         self.futures = {}
-        self.disconnect_callback = None
+        self.disconnect_callback = disconnect_callback
+        self.queue = asyncio.Queue()
+        self.ping_queue = asyncio.Queue()
+        self.input_queue = asyncio.Queue()
+        self.input_ping_queue = asyncio.Queue()
 
         self.load_key_file()
 
@@ -100,150 +124,224 @@ class WebOsClient(object):
             f.write(json.dumps(key_dict))
 
     async def connect(self):
-        """Connect to tv and register."""
+        if self.is_connected():
+            return True
         
-        #cleanup any existing connection first
-        await self.disconnect()
+        res = asyncio.Future()
+        self.connect_task = asyncio.create_task(self.connect_handler(res))
+        return await res
         
-        file = os.path.join(os.path.dirname(__file__), HANDSHAKE_FILE_NAME)
-
-        data = codecs.open(file, 'r', 'utf-8')
-        raw_handshake = data.read()
-
-        handshake = json.loads(raw_handshake)
-        handshake['payload']['client-key'] = self.client_key
-        
-        try:
-            self.connection = await asyncio.wait_for(websockets.connect(f"ws://{self.ip}:{self.port}", ping_interval=self.ping_interval, ping_timeout=self.timeout_connect, close_timeout=self.timeout_connect), timeout=self.timeout_connect)
-
-            await self.connection.send(json.dumps(handshake))
-            raw_response = await self.connection.recv()
-            response = json.loads(raw_response)
-
-            if response['type'] == 'response' and \
-                            response['payload']['pairingType'] == 'PROMPT':
-                raw_response = await self.connection.recv()
-                response = json.loads(raw_response)
-                if response['type'] == 'registered':
-                    self.client_key = response['payload']['client-key']
-                    self.save_key_file()
-                
-            if not self.client_key:
-                raise PyLGTVPairException("Unable to pair")
-                
-            self.callbacks = {}
-            self.futures = {}
-            self.listen_task = asyncio.get_event_loop().create_task(self.listen())
-
-            #open additional connection needed to send button commands
-            #the url is dynamically generated and returned from the EP_INPUT_SOCKET
-            #endpoint on the main connection
-            res = await self.request(EP_INPUT_SOCKET)
-            inputsockpath = res.get("socketPath")
-            self.input_connection =  await asyncio.wait_for(websockets.connect(inputsockpath, ping_interval=self.ping_interval, ping_timeout=self.timeout_connect, close_timeout=self.timeout_connect), timeout = self.timeout_connect)
-
-            self.listen_input_task = asyncio.get_event_loop().create_task(self.listen_input())
-        except:
-            await self.disconnect()
-            raise
-            
-
     async def disconnect(self):
-        """Stop listening and close connections."""
-        
-        if self.listen_task is not None:
-            if not self.listen_task.done():
-                self.listen_task.cancel()
-        
-        if self.listen_input_task is not None:
-            if not self.listen_input_task.done():
-                self.listen_input_task.cancel()
-        
-        self.callbacks = {}    
+        if self.connect_task is not None:
+            if not self.connect_task.done():
+                self.connect_task.cancel()
+                await self.connect_task
+            self.connect_task = None
 
-        for future in self.futures.values():
-            future.cancel()
-        self.futures = {}
+    def registration_msg(self):
+        handshake = copy.deepcopy(REGISTRATION_MESSAGE)
+        handshake['payload']['client-key'] = self.client_key
+        return handshake
+    
 
-        closeout = set()
-        if self.listen_task is not None:
-            closeout.add(self.listen_task)
-        if self.listen_input_task is not None:
-            closeout.add(self.listen_input_task)
-        if self.connection is not None:
-            closeout.add(self.connection.close())
-        if self.input_connection is not None:
-            closeout.add(self.input_connection.close())
-        if self.disconnect_callback is not None:
-            closeout.add(self.disconnect_callback())
-        
-        self.listen_task = None
-        self.listen_input_task = None
-        self.connection = None
-        self.input_connection = None
-        
-        if closeout:
-            await asyncio.wait(closeout)
+    async def connect_handler(self, res):
+
+        handler_tasks = set()
+        try:
+            async with WebSocketConnectWrapper(f"ws://{self.ip}:{self.port}",
+                                               ping_interval=self.ping_interval,
+                                               ping_timeout=self.timeout_connect,
+                                               close_timeout=self.timeout_connect,
+                                               connect_timeout=self.timeout_connect,
+                                               disconnect_callback = None) as ws:
+                await ws.send(json.dumps(self.registration_msg()))
+                raw_response = await ws.recv()
+                response = json.loads(raw_response)
+
+                if response['type'] == 'response' and \
+                                response['payload']['pairingType'] == 'PROMPT':
+                    raw_response = await ws.recv()
+                    response = json.loads(raw_response)
+                    if response['type'] == 'registered':
+                        self.client_key = response['payload']['client-key']
+                        self.save_key_file()
+                    
+                if not self.client_key:
+                    raise PyLGTVPairException("Unable to pair")
+                
+                self.callbacks = {}
+                self.futures = {}
+                self.queue = asyncio.Queue()
+                self.ping_queue = asyncio.Queue()
+                
+                handler_task = asyncio.create_task(self.handler(ws,self.callbacks,self.futures,self.queue,self.ping_queue))
+                handler_tasks.add(handler_task)
+
+                #open additional connection needed to send button commands
+                #the url is dynamically generated and returned from the EP_INPUT_SOCKET
+                #endpoint on the main connection
+                sockres = await self.request(EP_INPUT_SOCKET)
+                inputsockpath = sockres.get("socketPath")
+                async with WebSocketConnectWrapper(inputsockpath,
+                                                ping_interval=self.ping_interval,
+                                                ping_timeout=self.timeout_connect,
+                                                close_timeout=self.timeout_connect,
+                                                connect_timeout=self.timeout_connect,
+                                                disconnect_callback = self.disconnect_callback) as inputws:
+                    
+                    self.input_queue = asyncio.Queue()
+                    self.input_ping_queue = asyncio.Queue()
+                    input_handler_task = asyncio.create_task(self.handler(inputws, queue=self.input_queue, ping_queue=self.input_ping_queue))
+                    handler_tasks.add(input_handler_task)
+                    
+                    res.set_result(True)
+                    
+                    done, pending = await asyncio.wait(handler_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.wait(pending)
+        except Exception as ex:
+            if not res.done():
+                res.set_exception(ex)
+        finally:
+            for task in handler_tasks:
+                if not task.done() and not task.cancelled():
+                    task.cancel()
             
+            if handler_tasks:
+                await asyncio.wait(handler_tasks)
+                
+
+    async def handler(self, ws, callbacks={}, futures={}, queue=asyncio.Queue(), ping_queue=asyncio.Queue()):
+        handlers = set()
+        try:
+            handlers.add(asyncio.create_task(self.consumer_handler(ws,callbacks,futures)))
+            handlers.add(asyncio.create_task(self.producer_handler(ws,queue)))
+            handlers.add(asyncio.create_task(self.ping_handler(ws,ping_queue)))
+            
+            done, pending = await asyncio.wait(handlers, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            
+            if pending:
+                await asyncio.wait(pending)
+        finally:
+            for task in handlers:
+                if not task.done() and not task.cancelled():
+                    task.cancel()
+            if handlers:
+                await asyncio.wait(handlers)
+
+    async def ping_handler(self, ws, queue=asyncio.Queue()):
+        try: 
+            while True:
+                res = await queue.get()
+                try:
+                    pong_waiter = await ws.ping()
+                    try:
+                        await asyncio.wait_for(pong_waiter, timeout = self.timeout_connect)
+                    except asyncio.TimeoutError as ex:
+                        pong_waiter.result()
+                        res.set_exception(ex)
+                        break
+                    
+                    res.set_result(True)
+                except (websockets.exceptions.ConnectionClosedError) as ex:
+                    res.set_exception(ex)
+                    break
+                finally:
+                    if not res.done():
+                        res.cancel()
+                queue.task_done()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            while not queue.empty():
+                res = queue.get_nowait()
+                res.cancel()
+                queue.task_done()
+                
+            
+    async def consumer_handler(self, ws, callbacks={}, futures={}):
+        try:
+            async for raw_msg in ws:
+                if callbacks or futures:
+                    msg = json.loads(raw_msg)
+                    uid = msg.get('id')
+                    if uid in self.callbacks:
+                        await self.callbacks[uid](msg.get('payload'))
+                    if uid in self.futures:
+                        self.futures[uid].set_result(msg.get('payload'))
+        except (websockets.exceptions.ConnectionClosedError, asyncio.CancelledError):
+            pass
+        finally:
+            callbacks.clear()
+            for future in futures.values():
+                future.cancel()
+            futures.clear()
+        
+    async def producer_handler(self, ws, queue):
+        try: 
+            while True:
+                res,raw_msg = await queue.get()
+                try:
+                    await ws.send(raw_msg)
+                    res.set_result(True)
+                except websockets.exceptions.ConnectionClosedError as ex:
+                    res.set_exception(ex)
+                    break
+                finally:
+                    if not res.done():
+                        res.cancel()
+                queue.task_done()
+        except asyncio.CancelledError:
+            #try to send all messages currently in the queue
+            sending = set()
+            while not queue.empty():
+                raw_msg = queue.get_nowait()
+                sending.add(asyncio.create_task(ws.send(raw_msg)))
+            if sending:
+                try:
+                    done,pending = await asyncio.wait(sending)
+                except websockets.exceptions.ConnectionClosedError:
+                    pass
+                for item in done:
+                    queue.task_done()
+        finally:
+            while not queue.empty():
+                res, raw_msg = queue.get_nowait()
+                res.cancel()
+                queue.task_done()
+
+
     def is_registered(self):
         """Paired with the tv."""
         return self.client_key is not None
     
     def is_connected(self):
-        """Connected to the tv."""
-        return self.connection is not None and self.input_connection is not None
+        if self.connect_task is None:
+            return False
+        return not (self.connect_task.done() or self.connect_task.cancelled())
     
+  
     async def ping(self):
-        pings = set()
-        if self.connection is not None:
-            pings.add(self.connection.ping())
-        if self.input_connection is not None:
-            pings.add(self.input_connection.ping())
-            
-        if pings:
-            try:
-                await asyncio.wait(pings, timeout=self.timeout_connect)
-            except asyncio.TimeoutError:
-                await self.disconnect()
-    
-    def set_disconnect_callback(self, callback):
-        """Set callback function on disconnect."""
-        self.disconnect_callback = callback
-
-    async def listen(self):
-        """Listen for incoming messages and handle disconnect."""
+        res = asyncio.Future()
+        inputres = asyncio.Future()
+        
+        await self.ping_queue.put(res)
+        await self.input_ping_queue.put(inputres)
+        
+        
+        await asyncio.wait({res,inputres})
         try:
-            async for raw_msg in self.connection:
-                msg = json.loads(raw_msg)
-                uid = msg.get('id')
-                if uid in self.callbacks:
-                    await self.callbacks[uid](msg.get('payload'))
-                if uid in self.futures:
-                    self.futures[uid].set_result(msg.get('payload'))
-        except websockets.exceptions.ConnectionClosedError:
-            #shielding of disconnect call and handling of cancel needed
-            #to avoid circular dependency
-            try:
-                await asyncio.shield(self.disconnect())
-            except asyncio.CancelledError:
-                pass
-        except asyncio.CancelledError:
-            return
-            
-    async def listen_input(self):
-        """Listen for incoming messages and handle disconnect."""
+            res.result()
+        except (websockets.exceptions.ConnectionClosedError, asyncio.TimeoutError, asyncio.CancelledError):
+            pass
         try:
-            async for raw_msg in self.input_connection:
-                pass
-        except websockets.exceptions.ConnectionClosedError:
-            #shielding of disconnect call and handling of cancel needed
-            #to avoid circular dependency
-            try:
-                await asyncio.shield(self.disconnect())
-            except asyncio.CancelledError:
-                pass
-        except asyncio.CancelledError:
-            return
+            inputres.result()
+        except (websockets.exceptions.ConnectionClosedError, asyncio.TimeoutError, asyncio.CancelledError):
+            pass
 
     async def command(self, request_type, uri, payload=None, uid=None):
         """Build and send a command."""
@@ -261,10 +359,12 @@ class WebOsClient(object):
             'payload': payload,
         }
         
-        if self.connection is None:
+        if not self.is_connected():
             raise PyLGTVCmdException()
-
-        await self.connection.send(json.dumps(message))
+        
+        res = asyncio.Future()
+        await self.queue.put((res, json.dumps(message)))
+        await res
 
     async def request(self, uri, payload=None):
         """Send a request and wait for response."""
@@ -293,45 +393,37 @@ class WebOsClient(object):
         self.callbacks[uid] = callback
         await self.command('subscribe', uri, payload, uid)
     
+    async def input_command(self, message):
+        if not self.is_connected():
+            raise PyLGTVCmdException()
+        
+        res = asyncio.Future()
+        await self.input_queue.put((res, message))
+        await res
+    
     async def button(self, name):
         """Send button press command."""
         
         message = f"type:button\nname:{name}\n\n"
-        
-        if self.input_connection is None:
-            raise PyLGTVCmdException()
-        
-        await self.input_connection.send(message)
+        await self.input_command(message)
         
     async def move(self, dx, dy, down=0):
         """Send cursor move command."""
         
         message = f"type:move\ndx:{dx}\ndy:{dy}\ndown:{down}\n\n"
-        
-        if self.input_connection is None:
-            raise PyLGTVCmdException()
-        
-        await self.input_connection.send(message)
+        await self.input_command(message)
         
     async def click(self):
         """Send cursor click command."""
         
         message = f"type:click\n\n"
-        
-        if self.input_connection is None:
-            raise PyLGTVCmdException()
-        
-        await self.input_connection.send(message)
+        await self.input_command(message)
         
     async def scroll(self, dx, dy):
         """Send scroll command."""
         
         message = f"type:scroll\ndx:{dx}\ndy:{dy}\n\n"
-        
-        if self.input_connection is None:
-            raise PyLGTVCmdException()
-        
-        await self.input_connection.send(message)
+        await self.input_command(message)
 
     async def send_message(self, message, icon_path=None):
         """Show a floating message."""
