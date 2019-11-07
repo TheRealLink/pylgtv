@@ -331,6 +331,9 @@ class WebOsClient(object):
     def unregister_state_update_callback(self, callback):
         if callback in self.state_update_callbacks:
             self.state_update_callbacks.remove(callback)
+            
+    def clear_state_update_callbacks(self):
+        self.state_update_callbacks = []
     
     async def do_state_update_callbacks(self):
         callbacks = set()
