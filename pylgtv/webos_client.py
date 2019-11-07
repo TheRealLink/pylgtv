@@ -49,7 +49,7 @@ class WebSocketConnectWrapper(websockets.connect):
     
 
 class WebOsClient(object):
-    def __init__(self, ip, key_file_path=None, timeout_connect=2, timeout_request=10, ping_interval=20, disconnect_callback = None):
+    def __init__(self, ip, key_file_path=None, timeout_connect=2, timeout_request=10, ping_interval=20, standby_connection = False):
         """Initialize the client."""
         self.ip = ip
         self.port = 3000
@@ -60,13 +60,21 @@ class WebOsClient(object):
         self.timeout_connect = timeout_connect
         self.timeout_request = timeout_request
         self.ping_interval = ping_interval
+        self.standby_connection = standby_connection
         self.connect_task = None
+        self.connect_result = None
+        self.connection = None
+        self.input_connection = None
+        self.callbacks = {}
         self.futures = {}
-        self.disconnect_callback = disconnect_callback
-        self.queue = asyncio.Queue()
-        self.ping_queue = asyncio.Queue()
-        self.input_queue = asyncio.Queue()
-        self.input_ping_queue = asyncio.Queue()
+        self._current_appId = ""
+        self._muted = muted = False
+        self._volume = 0
+        self._current_channel = None
+        self._apps = {}
+        self._extinputs = {}
+        self.state_update_callbacks = []
+        self.doStateUpdate = False
 
         self.load_key_file()
 
@@ -123,225 +131,256 @@ class WebOsClient(object):
 
             f.write(json.dumps(key_dict))
 
-    async def connect(self):
-        if self.is_connected():
-            return True
-        
-        res = asyncio.Future()
-        self.connect_task = asyncio.create_task(self.connect_handler(res))
-        return await res
+    async def connect(self):        
+        if not self.is_connected():
+            self.connect_result = asyncio.Future()
+            self.connect_task = asyncio.create_task(self.connect_handler(self.connect_result))
+        return await self.connect_result
         
     async def disconnect(self):
-        if self.connect_task is not None:
-            if not self.connect_task.done():
-                self.connect_task.cancel()
-                await self.connect_task
-            self.connect_task = None
+        if self.is_connected():
+            self.connect_task.cancel()
+            print("disconnect: disconnecting")
+            await self.connect_task
+            print("disconnect: disconnected")
+        
+    def is_registered(self):
+        """Paired with the tv."""
+        return self.client_key is not None
+    
+    def is_connected(self):
+        return (self.connect_task is not None and not self.connect_task.done())
 
     def registration_msg(self):
         handshake = copy.deepcopy(REGISTRATION_MESSAGE)
         handshake['payload']['client-key'] = self.client_key
         return handshake
-    
 
     async def connect_handler(self, res):
 
         handler_tasks = set()
+        ws = None
+        inputws = None
         try:
-            async with WebSocketConnectWrapper(f"ws://{self.ip}:{self.port}",
-                                               ping_interval=self.ping_interval,
-                                               ping_timeout=self.timeout_connect,
-                                               close_timeout=self.timeout_connect,
-                                               connect_timeout=self.timeout_connect,
-                                               disconnect_callback = None) as ws:
-                await ws.send(json.dumps(self.registration_msg()))
+            print("trying to connect")
+            ws = await asyncio.wait_for(websockets.connect(f"ws://{self.ip}:{self.port}",
+                                                    ping_interval=None,
+                                                    close_timeout=self.timeout_connect),
+                                timeout = self.timeout_connect)
+            print("sending reg msg")
+            await ws.send(json.dumps(self.registration_msg()))
+            print("awaiting response")
+            raw_response = await ws.recv()
+            response = json.loads(raw_response)
+
+            if response['type'] == 'response' and \
+                            response['payload']['pairingType'] == 'PROMPT':
                 raw_response = await ws.recv()
                 response = json.loads(raw_response)
-
-                if response['type'] == 'response' and \
-                                response['payload']['pairingType'] == 'PROMPT':
-                    raw_response = await ws.recv()
-                    response = json.loads(raw_response)
-                    if response['type'] == 'registered':
-                        self.client_key = response['payload']['client-key']
-                        self.save_key_file()
-                    
-                if not self.client_key:
-                    raise PyLGTVPairException("Unable to pair")
+                if response['type'] == 'registered':
+                    self.client_key = response['payload']['client-key']
+                    self.save_key_file()
                 
-                self.callbacks = {}
-                self.futures = {}
-                self.queue = asyncio.Queue()
-                self.ping_queue = asyncio.Queue()
-                
-                handler_task = asyncio.create_task(self.handler(ws,self.callbacks,self.futures,self.queue,self.ping_queue))
-                handler_tasks.add(handler_task)
+            if not self.client_key:
+                raise PyLGTVPairException("Unable to pair")
+            
+            self.callbacks = {}
+            self.futures = {}
+            
+            print("starting listener")
+            handler_tasks.add(asyncio.create_task(self.consumer_handler(ws,self.callbacks,self.futures)))
+            if self.ping_interval is not None:
+                handler_tasks.add(asyncio.create_task(self.ping_handler(ws, self.ping_interval)))
+            self.connection = ws
+            
+            #open additional connection needed to send button commands
+            #the url is dynamically generated and returned from the EP_INPUT_SOCKET
+            #endpoint on the main connection
+            sockres = await self.request(EP_INPUT_SOCKET)
+            inputsockpath = sockres.get("socketPath")
+            inputws = await asyncio.wait_for(websockets.connect(inputsockpath,
+                                                        ping_interval=None,
+                                                        close_timeout=self.timeout_connect),
+                                    timeout = self.timeout_connect)            
 
-                #open additional connection needed to send button commands
-                #the url is dynamically generated and returned from the EP_INPUT_SOCKET
-                #endpoint on the main connection
-                sockres = await self.request(EP_INPUT_SOCKET)
-                inputsockpath = sockres.get("socketPath")
-                async with WebSocketConnectWrapper(inputsockpath,
-                                                ping_interval=self.ping_interval,
-                                                ping_timeout=self.timeout_connect,
-                                                close_timeout=self.timeout_connect,
-                                                connect_timeout=self.timeout_connect,
-                                                disconnect_callback = self.disconnect_callback) as inputws:
-                    
-                    self.input_queue = asyncio.Queue()
-                    self.input_ping_queue = asyncio.Queue()
-                    input_handler_task = asyncio.create_task(self.handler(inputws, queue=self.input_queue, ping_queue=self.input_ping_queue))
-                    handler_tasks.add(input_handler_task)
-                    
-                    res.set_result(True)
-                    
-                    done, pending = await asyncio.wait(handler_tasks, return_when=asyncio.FIRST_COMPLETED)
-                    for task in pending:
-                        task.cancel()
-                    if pending:
-                        await asyncio.wait(pending)
+            handler_tasks.add(asyncio.create_task(inputws.wait_closed()))
+            if self.ping_interval is not None:
+                handler_tasks.add(asyncio.create_task(self.ping_handler(inputws, self.ping_interval)))
+            self.input_connection = inputws
+            
+            #subscribe to state updates
+            #avoid partial updates during initial subscription
+            
+            self.doStateUpdate = False
+            await asyncio.gather(self.subscribe_current_app(self.set_current_app_state),
+                                 self.subscribe_muted(self.set_muted_state),
+                                 self.subscribe_volume(self.set_volume_state),
+                                 self.subscribe_current_channel(self.set_current_channel_state),
+                                 self.subscribe_apps(self.set_apps_state),
+                                 self.subscribe_inputs(self.set_inputs_state),
+                                 )
+            self.doStateUpdate = True
+            if self.state_update_callbacks:
+                await self.do_state_update_callbacks()
+            
+            res.set_result(True)
+            
+            await asyncio.wait(handler_tasks, return_when=asyncio.FIRST_COMPLETED)
+            
         except Exception as ex:
             if not res.done():
                 res.set_exception(ex)
         finally:
+            print("disconnecting")
             for task in handler_tasks:
-                if not task.done() and not task.cancelled():
+                if not task.done():
                     task.cancel()
-            
-            if handler_tasks:
-                await asyncio.wait(handler_tasks)
-                
-
-    async def handler(self, ws, callbacks={}, futures={}, queue=asyncio.Queue(), ping_queue=asyncio.Queue()):
-        handlers = set()
-        try:
-            handlers.add(asyncio.create_task(self.consumer_handler(ws,callbacks,futures)))
-            handlers.add(asyncio.create_task(self.producer_handler(ws,queue)))
-            handlers.add(asyncio.create_task(self.ping_handler(ws,ping_queue)))
-            
-            done, pending = await asyncio.wait(handlers, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            
-            if pending:
-                await asyncio.wait(pending)
-        finally:
-            for task in handlers:
-                if not task.done() and not task.cancelled():
-                    task.cancel()
-            if handlers:
-                await asyncio.wait(handlers)
-
-    async def ping_handler(self, ws, queue=asyncio.Queue()):
-        try: 
-            while True:
-                res = await queue.get()
-                try:
-                    pong_waiter = await ws.ping()
-                    try:
-                        await asyncio.wait_for(pong_waiter, timeout = self.timeout_connect)
-                    except asyncio.TimeoutError as ex:
-                        pong_waiter.result()
-                        res.set_exception(ex)
-                        break
                     
-                    res.set_result(True)
-                except (websockets.exceptions.ConnectionClosedError) as ex:
-                    res.set_exception(ex)
-                    break
-                finally:
-                    if not res.done():
-                        res.cancel()
-                queue.task_done()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            while not queue.empty():
-                res = queue.get_nowait()
-                res.cancel()
-                queue.task_done()
-                
+            for future in self.futures:
+                future.cancel()
             
+            closeout = set()
+            closeout.update(handler_tasks)
+            
+            if ws is not None:
+                closeout.add(asyncio.create_task(ws.close()))
+            if inputws is not None:
+                closeout.add(asyncio.create_task(inputws.close()))
+            
+            self.connection = None
+            self.input_connection = None
+            
+            self._current_appId = ""
+            self._muted = muted = False
+            self._volume = 0
+            self._current_channel = None
+            self._apps = {}
+            self._extinputs = {}
+            
+            self.doStateUpdate = True
+            
+            for callback in self.state_update_callbacks:
+                closeout.add(callback())
+            
+            if closeout:
+                print("closeout")
+                closeout_task = asyncio.create_task(asyncio.wait(closeout))
+                
+                while not closeout_task.done():
+                    try:
+                        await asyncio.shield(closeout_task)
+                    except asyncio.CancelledError:
+                        pass
+            print("disconnected")
+
+    async def ping_handler(self, ws, interval=20):
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if self.current_appId != "" or not self.standby_connection:
+                    print("pinging")
+                    ping_waiter = await ws.ping()
+                    await asyncio.wait_for(ping_waiter, timeout = self.timeout_connect)
+        except (asyncio.TimeoutError, asyncio.CancelledError, websockets.exceptions.ConnectionClosedError):
+            pass
+
     async def consumer_handler(self, ws, callbacks={}, futures={}):
         try:
             async for raw_msg in ws:
                 if callbacks or futures:
                     msg = json.loads(raw_msg)
                     uid = msg.get('id')
+                    payload = msg.get('payload')
                     if uid in self.callbacks:
-                        await self.callbacks[uid](msg.get('payload'))
+                        await self.callbacks[uid](payload)
                     if uid in self.futures:
-                        self.futures[uid].set_result(msg.get('payload'))
+                        self.futures[uid].set_result(payload)
         except (websockets.exceptions.ConnectionClosedError, asyncio.CancelledError):
             pass
-        finally:
-            callbacks.clear()
-            for future in futures.values():
-                future.cancel()
-            futures.clear()
-        
-    async def producer_handler(self, ws, queue):
-        try: 
-            while True:
-                res,raw_msg = await queue.get()
-                try:
-                    await ws.send(raw_msg)
-                    res.set_result(True)
-                except websockets.exceptions.ConnectionClosedError as ex:
-                    res.set_exception(ex)
-                    break
-                finally:
-                    if not res.done():
-                        res.cancel()
-                queue.task_done()
-        except asyncio.CancelledError:
-            #try to send all messages currently in the queue
-            sending = set()
-            while not queue.empty():
-                raw_msg = queue.get_nowait()
-                sending.add(asyncio.create_task(ws.send(raw_msg)))
-            if sending:
-                try:
-                    done,pending = await asyncio.wait(sending)
-                except websockets.exceptions.ConnectionClosedError:
-                    pass
-                for item in done:
-                    queue.task_done()
-        finally:
-            while not queue.empty():
-                res, raw_msg = queue.get_nowait()
-                res.cancel()
-                queue.task_done()
 
+    #manage state
+    @property
+    def current_appId(self):
+        return self._current_appId
+    
+    @property
+    def muted(self):
+        return self._muted
+    
+    @property
+    def volume(self):
+        return self._volume
+    
+    @property
+    def current_channel(self):
+        return self._current_channel
+    
+    @property
+    def apps(self):
+        return self._apps
+    
+    @property
+    def inputs(self):
+        return self._extinputs
+    
+    async def register_state_update_callback(self, callback):
+        self.state_update_callbacks.append(callback)
+        if self.doStateUpdate:
+            await callback()
+        
+    def unregister_state_update_callback(self, callback):
+        if callback in self.state_update_callbacks:
+            self.state_update_callbacks.remove(callback)
+    
+    async def do_state_update_callbacks(self):
+        callbacks = set()
+        for callback in self.state_update_callbacks:
+            callbacks.add(callback())
+            
+        if callbacks:
+            await asyncio.gather(*callbacks)
+    
+    async def set_current_app_state(self, appId):
+        self._current_appId = appId
+        
+        if self.state_update_callbacks and self.doStateUpdate:
+            await self.do_state_update_callbacks()
+        
+    async def set_muted_state(self, muted):
+        self._muted = muted
+        
+        if self.state_update_callbacks and self.doStateUpdate:
+            await self.do_state_update_callbacks()
+        
+    async def set_volume_state(self, volume):
+        self._volume = volume
+        
+        if self.state_update_callbacks and self.doStateUpdate:
+            await self.do_state_update_callbacks()
+        
+    async def set_current_channel_state(self, channel):
+        self._current_channel = channel
+        
+        if self.state_update_callbacks and self.doStateUpdate:
+            await self.do_state_update_callbacks()
+        
+    async def set_apps_state(self, apps):
+        self._apps = {}
+        for app in apps:
+            self._apps[app["id"]] = app
+            
+        if self.state_update_callbacks and self.doStateUpdate:
+            await self.do_state_update_callbacks()
+        
+    async def set_inputs_state(self, extinputs):
+        self._extinputs = {}
+        for extinput in extinputs:
+            self._extinputs[extinput["appId"]] = extinput
+            
+        if self.state_update_callbacks and self.doStateUpdate:
+            await self.do_state_update_callbacks()
 
-    def is_registered(self):
-        """Paired with the tv."""
-        return self.client_key is not None
-    
-    def is_connected(self):
-        if self.connect_task is None:
-            return False
-        return not (self.connect_task.done() or self.connect_task.cancelled())
-    
-  
-    async def ping(self):
-        res = asyncio.Future()
-        inputres = asyncio.Future()
-        
-        await self.ping_queue.put(res)
-        await self.input_ping_queue.put(inputres)
-        
-        
-        await asyncio.wait({res,inputres})
-        try:
-            res.result()
-        except (websockets.exceptions.ConnectionClosedError, asyncio.TimeoutError, asyncio.CancelledError):
-            pass
-        try:
-            inputres.result()
-        except (websockets.exceptions.ConnectionClosedError, asyncio.TimeoutError, asyncio.CancelledError):
-            pass
+    #low level request handling
 
     async def command(self, request_type, uri, payload=None, uid=None):
         """Build and send a command."""
@@ -359,21 +398,20 @@ class WebOsClient(object):
             'payload': payload,
         }
         
-        if not self.is_connected():
+        if self.connection is None:
             raise PyLGTVCmdException()
-        
-        res = asyncio.Future()
-        await self.queue.put((res, json.dumps(message)))
-        await res
 
-    async def request(self, uri, payload=None):
+        await self.connection.send(json.dumps(message))
+
+    async def request(self, uri, payload=None, cmd_type='request', uid=None):
         """Send a request and wait for response."""
-        uid = self.command_count
-        self.command_count += 1
+        if uid is None:
+            uid = self.command_count
+            self.command_count += 1
         res = asyncio.Future()
         self.futures[uid] = res
         try:
-            await self.command('request', uri, payload, uid)
+            await self.command(cmd_type, uri, payload, uid)
         except PyLGTVCmdException:
             del self.futures[uid]
             raise
@@ -391,15 +429,15 @@ class WebOsClient(object):
         uid = self.command_count
         self.command_count += 1
         self.callbacks[uid] = callback
-        await self.command('subscribe', uri, payload, uid)
+        return await self.request(uri, payload=payload, cmd_type='subscribe', uid=uid)
     
     async def input_command(self, message):
-        if not self.is_connected():
+        if self.input_connection is None:
             raise PyLGTVCmdException()
         
-        res = asyncio.Future()
-        await self.input_queue.put((res, message))
-        await res
+        await self.input_connection.send(message)
+    
+    #high level request handling
     
     async def button(self, name):
         """Send button press command."""
@@ -453,7 +491,7 @@ class WebOsClient(object):
         async def apps(payload):
             await callback(payload.get('launchPoints'))
                            
-        await self.subscribe(apps, EP_GET_APPS)
+        return await self.subscribe(apps, EP_GET_APPS)
 
     async def get_current_app(self):
         """Get the current app id."""
@@ -466,7 +504,7 @@ class WebOsClient(object):
         async def current_app(payload):
             await callback(payload.get('appId'))
         
-        await self.subscribe(current_app, EP_GET_CURRENT_APP_INFO)
+        return await self.subscribe(current_app, EP_GET_CURRENT_APP_INFO)
 
     async def launch_app(self, app):
         """Launch an app."""
@@ -504,8 +542,11 @@ class WebOsClient(object):
         """Return the current software status."""
         return await self.request(EP_GET_SOFTWARE_INFO)
 
-    async def power_off(self, disconnect=True):
+    async def power_off(self, disconnect=None):
         """Power off TV."""
+        if disconnect is None:
+            disconnect = not self.standby_connection
+
         if disconnect:
             #if tv is shutting down and standby++ option is not enabled,
             #response is unreliable, so don't wait for one,
@@ -542,7 +583,7 @@ class WebOsClient(object):
         async def inputs(payload):
             await callback(payload.get('devices'))
                            
-        await self.subscribe(inputs, EP_GET_INPUTS)
+        return await self.subscribe(inputs, EP_GET_INPUTS)
 
     async def get_input(self):
         """Get current input."""
@@ -570,7 +611,7 @@ class WebOsClient(object):
         async def muted(payload):
             await callback(payload.get('mute'))
         
-        await self.subscribe(muted, EP_GET_AUDIO_STATUS)
+        return await self.subscribe(muted, EP_GET_AUDIO_STATUS)
 
     async def set_mute(self, mute):
         """Set mute."""
@@ -589,7 +630,7 @@ class WebOsClient(object):
         async def volume(payload):
             await callback(payload.get('volume'))
         
-        await self.subscribe(volume, EP_GET_VOLUME)
+        return await self.subscribe(volume, EP_GET_VOLUME)
 
     async def set_volume(self, volume):
         """Set volume."""
@@ -626,7 +667,7 @@ class WebOsClient(object):
     
     async def subscribe_current_channel(self, callback):
         """Subscribe to changes in the current tv channel."""
-        await self.subscribe(callback, EP_GET_CURRENT_CHANNEL)
+        return await self.subscribe(callback, EP_GET_CURRENT_CHANNEL)
 
     async def get_channel_info(self):
         """Get the current channel info."""
